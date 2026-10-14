@@ -18,8 +18,8 @@ Weather app showing temperature, humidity and rain/snow, each with a colour-code
 - Weather data: [Open-Meteo](https://open-meteo.com/)
 - Firmware and scripting system: Blueforcer / AWTRIX NG
 - `weather_rain_32x8` is based on *[Weather Script](https://awtrix.de/script/fGEhP0cZZd6E)* by .hank_the_tank (AWTRIX Hub)
-- “Derived from Weather Script by .hank_the_tank; license follows the original author’s wishes.”
+
 
 ## License
 
-See [LICENSE](LICENSE).
+- “Derived from Weather Script by .hank_the_tank; license follows the original author’s wishes.”
