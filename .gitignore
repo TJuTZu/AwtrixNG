@@ -1,0 +1,21 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Backups and temp files
+*.bak
+*.tmp
+*.orig
+
+# Local-only stuff: device addresses, credentials, personal config
+.env
+*.local
+secrets*
+local/
