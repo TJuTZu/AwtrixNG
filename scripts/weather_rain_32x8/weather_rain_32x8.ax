@@ -1,31 +1,25 @@
 # @name Weather
-
 # @desc Weather with temperature, humidity and rain/snow, each with a 15-hour forecast, and moon phase
-
 # @author Hank_the_Tank (original), TJuTZu / Claude (modifications)
-
 # @version 4.0
-
 # Based on "Weather Script" 3.7 by .hank_the_tank (AWTRIX Hub)
-
 # Original: https://awtrix.de/script/fGEhP0cZZd6E
-
-# Modified version: https://github.com/TJuTZu/AwtrinNG
-
+# Modified version: https://github.com/TJuTZu/AwtrixNG
+# Changes from the original:
+#  - Three switchable values: temperature, humidity, rain/snow
+#  - Bottom 15-pixel forecast row follows the value on screen
+#  - Colour scales for humidity and rain/snow (rain and snow separate)
+#  - Open-Meteo request also fetches humidity, precipitation and snowfall;
+#    keep buffer raised from 640 to 1100 bytes
+# Weather data: Open-Meteo (https://open-meteo.com/)
+# Licence for the derived code follows the original author's wishes.
 # @config lat number "Latitude" default=52.52 min=-90 max=90 step=0.0001
-
 # @config lon number "Longitude" default=13.40 min=-180 max=180 step=0.0001
-
 # @config unit select "Temperature unit" default=C options=C,F
-
 # @config every number "Refresh" default=15 min=15 max=60 unit=min
-
 # @config showtemp bool "Show temperature" default=true
-
 # @config showhum bool "Show humidity" default=true
-
 # @config showrain bool "Show rain / snow" default=true
-
 # @config hold number "Swap after" default=3 min=1 max=10 unit=s help="How long each value stays before sliding to the next"
 
 
