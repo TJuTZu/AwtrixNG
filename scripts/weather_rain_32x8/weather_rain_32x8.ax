@@ -1,18 +1,9 @@
 # @name Weather Rain
 # @desc Weather with temperature, humidity and rain/snow, each with a 15-hour forecast, and moon phase
 # @author Hank_the_Tank (original), TJuTZu / Claude (modifications)
-# @version 4.0
-# Based on "Weather Script" 3.7 by .hank_the_tank (AWTRIX Hub)
-# Original: https://awtrix.de/script/fGEhP0cZZd6E
-# Modified version: https://github.com/TJuTZu/AwtrixNG
-# Changes from the original:
-#  - Three switchable values: temperature, humidity, rain/snow
-#  - Bottom 15-pixel forecast row follows the value on screen
-#  - Colour scales for humidity and rain/snow (rain and snow separate)
-#  - Open-Meteo request also fetches humidity, precipitation and snowfall;
-#    keep buffer raised from 640 to 1100 bytes
-# Weather data: Open-Meteo (https://open-meteo.com/)
-# Licence for the derived code follows the original author's wishes.
+# @version 4.1
+# Based on "Weather Script" 3.7 by .hank_the_tank (https://awtrix.de/script/fGEhP0cZZd6E)
+# Modified: https://github.com/TJuTZu/AwtrixNG - weather data: Open-Meteo
 # @config lat number "Latitude" default=52.52 min=-90 max=90 step=0.0001
 # @config lon number "Longitude" default=13.40 min=-180 max=180 step=0.0001
 # @config unit select "Temperature unit" default=C options=C,F
@@ -22,48 +13,27 @@
 # @config showrain bool "Show rain / snow" default=true
 # @config hold number "Swap after" default=3 min=1 max=10 unit=s help="How long each value stays before sliding to the next"
 
-
 class Weather
-  var st, hs, rs, ss, fc, hc, pc, cur, items
-  var label, tcol, hlabel, hcol, rlabel, rcol
-  var wic, mic, mday, ticks, age, traw, hraw, busy, period, hold, t0
+  var st, hs, rs, ss, rows, lab, col, cur, items, traw
+  var wic, mic, mday, ticks, age, busy, period, hold, t0
 
   def init()
-    # Colour stops: lower bound, colour - interpolated in between
-
-    # Temperature (C)
-
     self.st = [-12, 0xD977DF, -6, 0x9545BC, -1, 0x4B379C, 0, 0xFEC4FF,
                4, 0x31B8DB, 10, 0x31DB8B, 15, 0x6ED228, 21, 0xFFFF28,
                27, 0xF87E27, 32, 0xCF3927, 38, 0xA12527]
-
-    # Humidity (%): dry = orange/yellow, comfortable = green, damp = blue
-
     self.hs = [20, 0xF87E27, 35, 0xFFFF28, 50, 0x6ED228, 65, 0x31DB8B,
                80, 0x31B8DB, 100, 0x2A4BD6]
-
-    # Rain (mm/h, water): dry = dim blue, light = light blue, heavy = violet/magenta
-
     self.rs = [0, 0x23375F, 0.2, 0x5CC8FF, 1, 0x2F7BFF, 3, 0x6A2BE2,
                6, 0xE0309F]
-
-    # Snow (mm/h water equivalent): dry = dim grey, light = grey-blue, heavy = bright white
-
     self.ss = [0, 0x3A3F4E, 0.2, 0x8C9BC0, 1, 0xC8D4F0, 3, 0xFFFFFF]
-
-    self.fc = []
-    self.hc = []
-    self.pc = []
+    self.rows = [[], [], []]
     self.cur = 0
     self.period = store.get("every") * 60
     self.traw = store.get("temp")
-    self.label = self.traw == nil ? nil : self.label_for(self.traw)
-    self.tcol = store.get("col", 0x666666)
-    self.hraw = store.get("hum")
-    self.hlabel = self.hraw == nil ? "-" : self.hum_label(self.hraw)
-    self.hcol = self.hraw == nil ? 0x666666 : self.ramp(self.hs, self.hraw)
-    self.rlabel = "-"
-    self.rcol = 0x666666
+    var tl = nil
+    if self.traw != nil tl = self.label_for(self.traw) end
+    self.lab = [tl, store.get("hl", "-"), "-"]
+    self.col = [store.get("col", 0x666666), store.get("hcol", 0x666666), 0x666666]
     self.wic = store.get("icon", "")
     self.mic = ""
     self.mday = -1
@@ -72,11 +42,6 @@ class Weather
     self.busy = false
     self.hold = int(store.get("hold") * 1000)
     self.t0 = 0
-
-    # Values that rotate on the display: 0 = temperature, 1 = humidity, 2 = rain/snow.
-
-    # If everything is switched off, temperature is shown anyway.
-
     self.items = []
     if store.get("showtemp") self.items.push(0) end
     if store.get("showhum") self.items.push(1) end
@@ -85,42 +50,12 @@ class Weather
   end
 
   def label_for(t)
-    # Builds the display string from the raw Celsius temperature,
-
-    # so a C/F switch takes effect right after saving the settings
-
     var u = store.get("unit")
     var v = u == "F" ? t * 1.8 + 32 : t
     return str(int(v + (v >= 0 ? 0.5 : -0.5))) + (u == "F" ? "F" : "°")
   end
 
-  def hum_label(h)
-    # "100%" is wider than the 14 px text slot, so the sign is dropped there
-
-    var v = int(h + 0.5)
-    var s = str(v) + "%"
-    if text_ink_width(s) > 14 s = str(v) end
-    return s
-  end
-
-  def rain_label(q)
-    # Rain amount in mm with one decimal, whole number if too wide
-
-    var r = int(q * 10 + 0.5)
-    var s = str(int(r / 10)) + "." + str(r % 10)
-    if text_ink_width(s) > 14 s = str(int(q + 0.5)) end
-    return s
-  end
-
-  def is_snow(q, sn)
-    # Snow when at least half of the water comes as snow (snowfall cm / 0.7 = mm water)
-
-    return sn > 0 && sn * 10 / 7 * 2 >= q
-  end
-
   def ramp(s, v)
-    # Interpolates a colour from a flat list of [bound, colour, bound, colour, ...]
-
     var n = size(s)
     if v <= s[0] return s[1] end
     var j = 0
@@ -136,10 +71,10 @@ class Weather
                int(a % 256 + (b % 256 - a % 256) * f))
   end
 
-  def colors(txt, stops)
-    # Turns an hourly value array ("1.2,3.4,...") into up to 15 colours
-
+  def colors(txt, stops, stxt)
     var vals = re.matchall("[-0-9.]+", txt)
+    var sv = []
+    if size(stxt) > 0 sv = re.matchall("[-0-9.]+", stxt) end
     var n = size(vals)
     if n > 15 n = 15 end
     var out = []
@@ -147,7 +82,10 @@ class Weather
     while i < n
       var v = num(vals[i])
       if v == nil v = 0 end
-      out.push(self.ramp(stops, v))
+      var sn = 0
+      if i < size(sv) sn = num(sv[i]) end
+      if sn == nil sn = 0 end
+      out.push(self.ramp(sn > 0 && sn * 10.0 / 7 * 2 >= v ? self.ss : stops, v))
       i += 1
     end
     return out
@@ -155,75 +93,48 @@ class Weather
 
   def on_body(w, status)
     self.busy = false
-    if w == nil return end
+    if w == nil
+      self.ticks = 60
+      return
+    end
     var m = re.search("_2m\":([-0-9.]+)", w)
     var c = re.search("code\":(\\d+)", w)
     var h = re.search("_2m\":\\[([^\\]]*)", w)
-    if m == nil || c == nil || h == nil return end
+    if m == nil || c == nil || h == nil || num(m[1]) == nil
+      self.ticks = 60
+      return
+    end
     var t = num(m[1])
-    if t == nil return end
     self.traw = t
-    self.tcol = self.ramp(self.st, t)
-    self.label = self.label_for(t)
-    self.fc = self.colors(h[1], self.st)
-
-    # Humidity: current value and hourly forecast (both optional)
+    self.col[0] = self.ramp(self.st, t)
+    self.lab[0] = self.label_for(t)
+    self.rows[0] = self.colors(h[1], self.st, "")
 
     var hm = re.search("humidity_2m\":([0-9.]+)", w)
-    if hm != nil
-      var hv = num(hm[1])
-      if hv != nil
-        self.hraw = hv
-        self.hlabel = self.hum_label(hv)
-        self.hcol = self.ramp(self.hs, hv)
-        store.set("hum", hv)
-      end
-    end
     var hh = re.search("humidity_2m\":\\[([^\\]]*)", w)
-    if hh != nil
-      self.hc = self.colors(hh[1], self.hs)
+    if hm != nil && num(hm[1]) != nil
+      var hv = num(hm[1])
+      var hs = str(int(hv + 0.5))
+      self.lab[1] = text_ink_width(hs + "%") > 14 ? hs : hs + "%"
+      self.col[1] = self.ramp(self.hs, hv)
+      store.set("hl", self.lab[1])
+      store.set("hcol", self.col[1])
     end
+    if hh != nil self.rows[1] = self.colors(hh[1], self.hs, "") end
 
-    # Rain / snow: current value and hourly forecast (both optional)
-
-    var pcur = re.search("precipitation\":([0-9.]+)", w)
-    var scur = re.search("snowfall\":([0-9.]+)", w)
-    if pcur != nil
-      var q = num(pcur[1])
-      if q == nil q = 0 end
-      var sn = 0
-      if scur != nil
-        sn = num(scur[1])
-      end
-      if sn == nil sn = 0 end
-      self.rlabel = self.rain_label(q)
-      self.rcol = self.ramp(self.is_snow(q, sn) ? self.ss : self.rs, q)
+    var pc = re.search("precipitation\":([0-9.]+)", w)
+    var sc = re.search("snowfall\":([0-9.]+)", w)
+    var pa = re.search("precipitation\":\\[([^\\]]*)", w)
+    var sa = re.search("snowfall\":\\[([^\\]]*)", w)
+    if pc != nil && num(pc[1]) != nil
+      var q = num(pc[1])
+      var r = int(q * 10 + 0.5)
+      var s = str(int(r / 10)) + "." + str(r % 10)
+      if text_ink_width(s) > 14 s = str(int(q + 0.5)) end
+      self.lab[2] = s
+      self.col[2] = self.colors(pc[1], self.rs, sc == nil ? "" : sc[1])[0]
     end
-    var p = re.search("precipitation\":\\[([^\\]]*)", w)
-    var sf = re.search("snowfall\":\\[([^\\]]*)", w)
-    if p != nil
-      var pv = re.matchall("[-0-9.]+", p[1])
-      var sv = []
-      if sf != nil
-        sv = re.matchall("[-0-9.]+", sf[1])
-      end
-      var pn = size(pv)
-      if pn > 15 pn = 15 end
-      var pc = []
-      var k2 = 0
-      while k2 < pn
-        var q2 = num(pv[k2])
-        if q2 == nil q2 = 0 end
-        var s2 = 0
-        if k2 < size(sv)
-          s2 = num(sv[k2])
-        end
-        if s2 == nil s2 = 0 end
-        pc.push(self.ramp(self.is_snow(q2, s2) ? self.ss : self.rs, q2))
-        k2 += 1
-      end
-      self.pc = pc
-    end
+    if pa != nil self.rows[2] = self.colors(pa[1], self.rs, sa == nil ? "" : sa[1]) end
 
     var k = int(num(c[1]))
     var ic = "36637"
@@ -239,9 +150,8 @@ class Weather
     end
     self.wic = ic
     self.age = 0
-
-    store.set("temp", self.traw)
-    store.set("col", self.tcol)
+    store.set("temp", t)
+    store.set("col", self.col[0])
     store.set("icon", ic)
   end
 
@@ -267,7 +177,6 @@ class Weather
       end
       self.mic = ic
     end
-
     self.age += 1
     if self.ticks <= 0 && !self.busy
       self.ticks = self.period
@@ -285,91 +194,56 @@ class Weather
   end
 
   def on_show()
-    # Every appearance starts with the first enabled value
-
     self.t0 = now_ms()
-  end
-
-  def get_lab(k)
-    if k == 0 return self.label end
-    if k == 1 return self.hlabel end
-    return self.rlabel
-  end
-
-  def get_col(k)
-    if k == 0 return self.tcol end
-    if k == 1 return self.hcol end
-    return self.rcol
-  end
-
-  def get_row(k)
-    if k == 0 return self.fc end
-    if k == 1 return self.hc end
-    return self.pc
-  end
-
-  def put(s, y, col)
-    # Centres a value in the 14 px slot between the two icons
-
-    text(9 + int((14 - text_ink_width(s)) / 2), y, s, col)
-  end
-
-  def draw_values()
-    # Also sets self.cur: the value on screen, which decides the forecast row below it
-
-    var its = self.items
-    var n = size(its)
-    if n == 1
-      self.cur = its[0]
-      self.put(self.get_lab(self.cur), 6, self.get_col(self.cur))
-      return
-    end
-    var slide = 400                      # ms for one 8 px slide
-
-    var per = self.hold + slide
-    var t = now_ms() - self.t0
-    var idx = int(t / per) % n
-    var p = t % per
-    var a = its[idx]
-    var b = its[(idx + 1) % n]
-    if p < self.hold
-      self.cur = a
-      self.put(self.get_lab(a), 6, self.get_col(a))
-    else
-      # Outgoing value leaves at the top, incoming one rises from below
-
-      self.cur = b
-      var off = (p - self.hold) * 8 / slide
-      self.put(self.get_lab(a), 6 - off, self.get_col(a))
-      self.put(self.get_lab(b), 14 - off, self.get_col(b))
-    end
   end
 
   def draw()
     clear()
-    if self.label == nil
+    if self.lab[0] == nil
       text(6, 6, "...", 0x666666)
       return
     end
     if !icon(self.wic, 0, 0)
       circle_fill(4, 4, 3, 0xFFCC00)
     end
-    self.draw_values()
+    var its = self.items
+    var n = size(its)
+    var a = its[0]
+    var b = a
+    var off = 0
+    var sl = false
+    self.cur = a
+    if n > 1
+      var slide = 400
+      var per = self.hold + slide
+      var t = now_ms() - self.t0
+      var p = t % per
+      var idx = int(t / per) % n
+      a = its[idx]
+      if p >= self.hold
+        sl = true
+        b = its[(idx + 1) % n]
+        off = (p - self.hold) * 8 / slide
+      end
+      self.cur = sl ? b : a
+    end
+    var s = self.lab[a]
+    text(9 + int((14 - text_ink_width(s)) / 2), 6 - off, s, self.col[a])
+    if sl
+      s = self.lab[b]
+      text(9 + int((14 - text_ink_width(s)) / 2), 14 - off, s, self.col[b])
+    end
     if !icon(self.mic, 23, 0)
       circle_fill(27, 4, 3, 0xAAAAAA)
     end
-    # Forecast row is drawn after the values so it stays on top while sliding.
-
-    # It follows the value on screen: temperature, humidity or rain/snow.
-
-    var row = self.get_row(self.cur)
+    var row = self.rows[self.cur]
     var i = 0
-    var n = size(row)
-    while i < n
+    var rn = size(row)
+    while i < rn
       pixel(8 + i, 7, row[i])
       i += 1
     end
-    if self.age > 1200
+    if self.age > self.period + 300
       pixel(width() - 1, height() - 1, 0xFF0000)
     end
   end
