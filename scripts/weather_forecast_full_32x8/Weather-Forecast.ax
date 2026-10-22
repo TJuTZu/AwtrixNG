@@ -1,0 +1,437 @@
+# @name Weather Forecast
+# @desc Animated weather background (sun or moon at the left, clouds drifting across, rain, snow, thunder), temperature in C/F, current and 32 h rain, wind speed with direction arrow, colour-coded 32 h forecast row
+# @author TJuTZu / Claude (based on Weather Rain 4.1, original by Hank_the_Tank)
+# @version 9.0
+# @config lat number "Latitude" default=60.1699 min=-90 max=90 step=0.0001
+# @config lon number "Longitude" default=24.9384 min=-180 max=180 step=0.0001
+# @config every number "Refresh" default=15 min=15 max=60 unit=min
+# @config hemisphere select "Hemisphere (moon phase side)" default=North options=North,South
+# @config outline bool "Black text outline" default=true
+# @config showtemp bool "Temperature" default=true
+# @config ttime number "Temperature show time" default=4 min=1 max=30 unit=s
+# @config unit select "Temperature unit" default=C options=C,F
+# @config showrain bool "Rain" default=true
+# @config rtime number "Rain show time" default=3 min=1 max=30 unit=s
+# @config rainalways bool "Rain always on" default=false help="Off = Auto: shown only when the 32 h total reaches the threshold"
+# @config minrain number "Rain auto threshold (32 h total, mm)" default=0.2 min=0 max=5 step=0.1 unit=mm
+# @config rainunit select "Rain unit" default=mm options=mm,in
+# @config showwind bool "Wind" default=true
+# @config wtime number "Wind show time" default=3 min=1 max=30 unit=s
+# @config windunit select "Wind speed unit" default=ms options=ms,kmh,mph,kn
+# @config winddir select "Wind arrow points" default=To options=To,From
+
+class WeatherForecast
+  var st, rs, ss, ws, dv, rows, lab, col, l2, c2, cur, its, dur, ic, code, isday, ph
+  var cq, cs, wd, ol, mday, ticks, age, busy, period, t0
+
+  def init()
+    self.st = [-12, 0xD977DF, -6, 0x9545BC, -1, 0x4B379C, 0, 0xFEC4FF,
+               4, 0x31B8DB, 10, 0x31DB8B, 15, 0x6ED228, 21, 0xFFFF28,
+               27, 0xF87E27, 32, 0xCF3927, 38, 0xA12527]
+    self.rs = [0, 0x23375F, 0.2, 0x5CC8FF, 1, 0x2F7BFF, 3, 0x6A2BE2,
+               6, 0xE0309F]
+    self.ss = [0, 0x3A3F4E, 0.2, 0x8C9BC0, 1, 0xC8D4F0, 3, 0xFFFFFF]
+    # wind colours by m/s
+    self.ws = [0, 0x3A5F8A, 3, 0x31B8DB, 6, 0x31DB8B, 10, 0xFFFF28,
+               14, 0xF87E27, 18, 0xCF3927, 25, 0xE0309F, 33, 0xFFFFFF]
+    # 8 directions clockwise (dx, dy): N NE E SE S SW W NW
+    self.dv = [0, -1, 1, -1, 1, 0, 1, 1, 0, 1, -1, 1, -1, 0, -1, -1]
+    self.rows = [[], [], []]
+    self.lab = [nil, "-", "-"]
+    self.col = [0x666666, 0x666666, 0x666666]
+    self.l2 = "-"
+    self.c2 = 0x666666
+    self.cur = 0
+    self.its = [0]
+    # show time per value (ms): temperature, rain, wind
+    self.dur = [int(store.get("ttime") * 1000), int(store.get("rtime") * 1000),
+                int(store.get("wtime") * 1000)]
+    self.ic = ""
+    self.code = -1
+    self.isday = 1
+    self.ph = 0
+    self.cq = 0.0
+    self.cs = 0.0
+    self.wd = 0
+    self.ol = store.get("outline")
+    self.mday = -1
+    self.ticks = 0
+    self.age = 9999
+    self.busy = false
+    self.period = store.get("every") * 60
+    self.t0 = 0
+  end
+
+  def ramp(s, v)
+    var n = size(s)
+    if v <= s[0] return s[1] end
+    var j = 0
+    while j < n - 2 && v >= s[j + 2]
+      j += 2
+    end
+    if j >= n - 2 return s[n - 1] end
+    var a = s[j + 1]
+    var b = s[j + 3]
+    var f = (v - s[j]) * 1.0 / (s[j + 2] - s[j])
+    return rgb(int(a / 65536 % 256 + (b / 65536 % 256 - a / 65536 % 256) * f),
+               int(a / 256 % 256 + (b / 256 % 256 - a / 256 % 256) * f),
+               int(a % 256 + (b % 256 - a % 256) * f))
+  end
+
+  def colors(txt, stops)
+    var vals = re.matchall("[-0-9.]+", txt)
+    var n = size(vals)
+    if n > width() n = width() end
+    var out = []
+    var i = 0
+    while i < n
+      var v = num(vals[i])
+      out.push(self.ramp(stops, v == nil ? 0 : v))
+      i += 1
+    end
+    return out
+  end
+
+  def ns(v)
+    # rain amount (v in mm) without unit: mm = one decimal, in = two decimals
+    if store.get("rainunit") == "in"
+      var ri = int(v / 25.4 * 100 + 0.5)
+      if ri >= 1000 return str(int(ri / 100)) end
+      var fr = ri % 100
+      return str(int(ri / 100)) + "." + (fr < 10 ? "0" : "") + str(fr)
+    end
+    if v >= 99.95 return str(int(v + 0.5)) end
+    var r = int(v * 10 + 0.5)
+    return str(int(r / 10)) + "." + str(r % 10)
+  end
+
+  def build()
+    # Icon name = "Wx" + sky type + body, e.g. WxCloudHeavySun or WxCloudHeavyMoon3North.
+    # If the weather code says dry/cloudy (0-3) but rain is falling now, the current
+    # precipitation decides the sky type.
+    var k = self.code
+    var q = self.cq
+    var ty = "Cloud"
+    if k <= 3 && q > 0
+      if self.cs > 0 && self.cs * 20.0 / 7 >= q ty = "CloudSnow"
+      elif q >= 3 ty = "CloudHeavy"
+      elif q >= 0.3 ty = "CloudRain"
+      else ty = "CloudDrizzle"
+      end
+    elif k <= 1 ty = "Clear"
+    elif k == 2 ty = "CloudPart"
+    elif k == 45 || k == 48 ty = "CloudFog"
+    elif k >= 51 && k <= 55 ty = "CloudDrizzle"
+    elif k == 56 || k == 57 || k == 66 || k == 67 ty = "CloudSleet"
+    elif k == 65 || k == 82 ty = "CloudHeavy"
+    elif k == 61 || k == 63 || k == 80 || k == 81 ty = "CloudRain"
+    elif k == 75 || k == 86 ty = "CloudSnowHeavy"
+    elif k == 71 || k == 73 || k == 77 || k == 85 ty = "CloudSnow"
+    elif k == 96 || k == 99 ty = "CloudHail"
+    elif k >= 95 ty = "CloudThunder"
+    end
+    # body: sun by day, moon phase by night (new and full moon are the same on both hemispheres)
+    var body = "Sun"
+    if self.isday != 1
+      body = "Moon" + str(self.ph)
+      if self.ph % 4 != 0 body += store.get("hemisphere") end
+    end
+    self.ic = "Wx" + ty + body
+  end
+
+  def on_body(w, status)
+    self.busy = false
+    if w == nil
+      self.ticks = 60
+      return
+    end
+    var m = re.search("_2m\":([-0-9.]+)", w)
+    var c = re.search("code\":(\\d+)", w)
+    var d = re.search("is_day\":(\\d)", w)
+    var h = re.search("_2m\":\\[([^\\]]*)", w)
+    if m == nil || c == nil || h == nil || num(m[1]) == nil
+      self.ticks = 60
+      return
+    end
+
+    # Temperature, whole degrees -50..50, sign only below zero; colours follow the C value
+    var t = num(m[1])
+    if t > 50 t = 50 elif t < -50 t = -50 end
+    var fh = store.get("unit") == "F"
+    var v = fh ? t * 1.8 + 32 : t
+    self.col[0] = self.ramp(self.st, t)
+    self.lab[0] = str(int(v + (v >= 0 ? 0.5 : -0.5))) + "°" + (fh ? "F" : "C")
+    self.rows[0] = self.colors(h[1], self.st)
+
+    # Current precipitation
+    var cp = re.search("precipitation\":([0-9.]+)", w)
+    var cn = re.search("snowfall\":([0-9.]+)", w)
+    self.cq = 0.0
+    self.cs = 0.0
+    if cp != nil && num(cp[1]) != nil self.cq = num(cp[1]) end
+    if cn != nil && num(cn[1]) != nil self.cs = num(cn[1]) end
+
+    # Rain / snow over the next 32 h
+    var rain = false
+    var pa = re.search("precipitation\":\\[([^\\]]*)", w)
+    var sa = re.search("snowfall\":\\[([^\\]]*)", w)
+    if pa != nil
+      var pv = re.matchall("[-0-9.]+", pa[1])
+      var sv = []
+      if sa != nil sv = re.matchall("[-0-9.]+", sa[1]) end
+      var n = size(pv)
+      if n > width() n = width() end
+      var row = []
+      var tot = 0.0
+      var mx = 0.0
+      var sq = 0.0
+      var i = 0
+      while i < n
+        var q = num(pv[i])
+        if q == nil q = 0 end
+        var s = 0
+        if i < size(sv) s = num(sv[i]) end
+        if s == nil s = 0 end
+        # snow when at least half of the water falls as snow (cm / 0.7 = mm)
+        var sn = s > 0 && s * 20.0 / 7 >= q
+        row.push(self.ramp(sn ? self.ss : self.rs, q))
+        tot += q
+        if q > mx mx = q end
+        if sn sq += q end
+        i += 1
+      end
+      self.rows[1] = row
+      # On: always shown. Off (auto): only when the 32 h total reaches the threshold
+      rain = store.get("showrain") && (store.get("rainalways") || (tot > 0 && tot >= store.get("minrain")))
+      if rain
+        var qc = self.cq
+        var sc = self.cs > 0 && self.cs * 20.0 / 7 >= qc
+        self.lab[1] = self.ns(qc)
+        self.col[1] = self.ramp(sc ? self.ss : self.rs, qc < 0.2 ? 0.2 : qc)
+        self.l2 = self.ns(tot)
+        self.c2 = self.ramp(sq * 2 >= tot ? self.ss : self.rs, mx < 0.2 ? 0.2 : mx)
+      end
+    end
+
+    # Wind (requested in m/s, converted for display)
+    var its = []
+    if store.get("showtemp") its.push(0) end
+    if rain its.push(1) end
+    var wn = re.search("wind_speed_10m\":([0-9.]+)", w)
+    var wa = re.search("wind_speed_10m\":\\[([^\\]]*)", w)
+    var wr = re.search("direction_10m\":([0-9.]+)", w)
+    if wn != nil && num(wn[1]) != nil
+      var ms = num(wn[1])
+      var u = store.get("windunit")
+      var fc = 1.0
+      if u == "kmh" fc = 3.6 elif u == "mph" fc = 2.23694 elif u == "kn" fc = 1.94384 end
+      self.lab[2] = str(int(ms * fc + 0.5))
+      self.col[2] = self.ramp(self.ws, ms)
+      # direction is where the wind comes FROM; "To" turns the arrow 180 deg
+      if wr != nil && num(wr[1]) != nil
+        self.wd = (int(num(wr[1]) / 45 + 0.5) + (store.get("winddir") == "From" ? 0 : 4)) % 8
+      end
+      if wa != nil self.rows[2] = self.colors(wa[1], self.ws) end
+      if store.get("showwind") its.push(2) end
+    end
+    if size(its) == 0 its.push(0) end
+    self.its = its
+
+    self.code = int(num(c[1]))
+    self.isday = d == nil ? 1 : int(num(d[1]))
+    self.age = 0
+    self.build()
+  end
+
+  def loop()
+    var d = day()
+    if d != self.mday
+      self.mday = d
+      var mo = month()
+      var a = int((14 - mo) / 12)
+      var yy = year() + 4800 - a
+      var mm = mo + 12 * a - 3
+      var f = (d + int((153 * mm + 2) / 5) + 365 * yy + int(yy / 4) -
+               int(yy / 100) + int(yy / 400) - 2483595) / 29.53058867
+      f -= int(f)
+      # 0 new, 1 waxing crescent, 2 first quarter, 3 waxing gibbous,
+      # 4 full, 5 waning gibbous, 6 last quarter, 7 waning crescent
+      self.ph = int(f * 8 + 0.5) % 8
+      if self.code >= 0 self.build() end
+    end
+    self.age += 1
+    if self.ticks <= 0 && !self.busy
+      self.ticks = self.period
+      self.busy = true
+      http.get("http://api.open-meteo.com/v1/forecast" +
+               "?latitude=" + str(store.get("lat")) +
+               "&longitude=" + str(store.get("lon")) +
+               "&current=temperature_2m,weather_code,is_day,precipitation,snowfall,wind_speed_10m,wind_direction_10m" +
+               "&hourly=temperature_2m,precipitation,snowfall,wind_speed_10m" +
+               "&wind_speed_unit=ms&forecast_hours=32&timeformat=unixtime&timezone=auto",
+               / b, st -> self.on_body(b, st),
+               {'find': "\"current\":", 'keep': 1700})
+    end
+    self.ticks -= 1
+  end
+
+  def on_show()
+    self.t0 = now_ms()
+  end
+
+  def tx(x, y, s, c)
+    if self.ol
+      text(x - 1, y, s, 0)
+      text(x + 1, y, s, 0)
+      text(x, y - 1, s, 0)
+      text(x, y + 1, s, 0)
+    end
+    text(x, y, s, c)
+  end
+
+  def cx(w)
+    # x for content of width w: centred in the area right of the sun/moon (x 8..31);
+    # if it is wider than that area, centred on the whole display
+    var W = width()
+    if w <= W - 8 return 8 + int((W - 8 - w) / 2) end
+    var x = int((W - w) / 2)
+    return x < 0 ? 0 : x
+  end
+
+  def arrow(x0, cy, c)
+    # 5x5 arrow: 5 px shaft, head = two 3 px arms (tip included) pointing back from the tip
+    var v = self.dv
+    var d = self.wd
+    var cx = x0 + 2
+    var pts = []
+    var k = -2
+    while k <= 2
+      pts.push(cx + k * v[d * 2])
+      pts.push(cy + k * v[d * 2 + 1])
+      k += 1
+    end
+    var tx = cx + 2 * v[d * 2]
+    var ty = cy + 2 * v[d * 2 + 1]
+    var a = 0
+    while a < 2
+      var j = ((d + 3 + a * 2) % 8) * 2
+      pts.push(tx + v[j])
+      pts.push(ty + v[j + 1])
+      pts.push(tx + 2 * v[j])
+      pts.push(ty + 2 * v[j + 1])
+      a += 1
+    end
+    var n = size(pts)
+    var p = self.ol ? 0 : 1
+    while p < 2
+      var i = 0
+      while i < n
+        if p == 0
+          pixel(pts[i] - 1, pts[i + 1], 0)
+          pixel(pts[i] + 1, pts[i + 1], 0)
+          pixel(pts[i], pts[i + 1] - 1, 0)
+          pixel(pts[i], pts[i + 1] + 1, 0)
+        else
+          pixel(pts[i], pts[i + 1], c)
+        end
+        i += 2
+      end
+      p += 1
+    end
+  end
+
+  def item(k, y)
+    var W = width()
+    if k == 0
+      var s = self.lab[0]
+      self.tx(self.cx(text_ink_width(s)), y, s, self.col[0])
+    elif k == 1
+      # current / 32 h total; drop leading zeros if it does not fit
+      var s1 = self.lab[1]
+      var s2 = self.l2
+      var wsl = text_ink_width("/")
+      if text_ink_width(s1) + text_ink_width(s2) + wsl + 4 > W
+        if size(s1) > 2 && s1[0] == "0" s1 = s1[1..] end
+        if size(s2) > 2 && s2[0] == "0" s2 = s2[1..] end
+      end
+      var w1 = text_ink_width(s1)
+      var w2 = text_ink_width(s2)
+      var g = 2
+      if w1 + w2 + wsl + 4 > W g = 1 end
+      var x = self.cx(w1 + w2 + wsl + 2 * g)
+      self.tx(x, y, s1, self.col[1])
+      self.tx(x + w1 + g, y, "/", 0x888888)
+      self.tx(x + w1 + wsl + 2 * g, y, s2, self.c2)
+    else
+      # speed + 2 px gap + 5 px arrow, centred together
+      var s = self.lab[2]
+      var w = text_ink_width(s)
+      var x = self.cx(w + 7)
+      self.tx(x, y, s, self.col[2])
+      self.arrow(x + w + 2, y - 3, self.col[2])
+    end
+  end
+
+  def draw()
+    clear()
+    if self.lab[0] == nil
+      text(10, 6, "...", 0x666666)
+      return
+    end
+    var W = width()
+    var nw = now_ms()
+
+    # Full-width 32x8 background GIF: sun/moon fixed at the left, clouds drifting across
+    if !icon(self.ic, 0, 0) circle_fill(3, 3, 3, 0x444444) end
+
+    # Rotation: every value stays for its own time, then slides up in 400 ms
+    var its = self.its
+    var cnt = size(its)
+    var a = its[0]
+    var b = a
+    var off = 0
+    self.cur = a
+    if cnt > 1
+      var tot = 0
+      var j = 0
+      while j < cnt
+        tot += self.dur[its[j]] + 400
+        j += 1
+      end
+      var t = (nw - self.t0) % tot
+      var idx = 0
+      while t >= self.dur[its[idx]] + 400
+        t -= self.dur[its[idx]] + 400
+        idx += 1
+      end
+      a = its[idx]
+      b = a
+      self.cur = a
+      if t >= self.dur[a]
+        b = its[(idx + 1) % cnt]
+        off = (t - self.dur[a]) * 8 / 400
+        self.cur = b
+      end
+    end
+    self.item(a, 6 - off)
+    if b != a self.item(b, 14 - off) end
+
+    # 32 h forecast row follows the value on screen, 1 px per hour
+    var row = self.rows[self.cur]
+    var rn = size(row)
+    var i = 0
+    while i < rn
+      pixel(i, 7, row[i])
+      i += 1
+    end
+    if self.age > self.period + 300
+      pixel(W - 1, 0, 0xFF0000)
+    end
+  end
+
+  def on_button(btn)
+    if btn == "select" self.ticks = 0 end
+  end
+end
+
+return WeatherForecast()
